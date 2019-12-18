@@ -157,7 +157,68 @@ func (app *App) SetUserAgentHeader(userAgentHeader string) {
 
 // GetUserAgentHeader get user-agent header string
 func (app *App) GetUserAgentHeader() string {
-	return app.userAgentHeader
+	if len(app.userAgentHeader) > 0 {
+		return app.userAgentHeader
+	}
+	return NAME + "/" + VERSION
+}
+
+func (app *App) createUrl(api string, query string) url.URL {
+	path := ""
+	if app.GuestSpaceId == 0 {
+		path = fmt.Sprintf("/k/v1/%s.json", api)
+	} else {
+		path = fmt.Sprintf("/k/guest/%d/v1/%s.json", app.GuestSpaceId, api)
+	}
+	if query == "" {
+		return url.URL{
+			Scheme: "https",
+			Host:   app.Domain,
+			Path:   path,
+		}
+	}
+	return url.URL{
+		Scheme:   "https",
+		Host:     app.Domain,
+		Path:     path,
+		RawQuery: query,
+	}
+}
+func (app *App) setAuth(request *http.Request) {
+	if app.basicAuth {
+		request.SetBasicAuth(app.basicAuthUser, app.basicAuthPassword)
+	}
+
+	if len(app.ApiToken) > 0 {
+		request.Header.Set("X-Cybozu-API-Token", app.ApiToken)
+	}
+
+	if len(app.User) > 0 && len(app.Password) > 0 {
+		request.Header.Set("X-Cybozu-Authorization", base64.StdEncoding.EncodeToString(
+			[]byte(app.User+":"+app.Password)))
+	}
+}
+
+func (app *App) NewRequest(method, url string, body io.Reader) (*http.Request, error) {
+	bodyData := io.Reader(nil)
+	if body != nil {
+		bodyData = body
+	}
+
+	request, err := http.NewRequest(method, url, bodyData)
+	if err != nil {
+		return nil, err
+	}
+
+	request.Header.Set("User-Agent", app.GetUserAgentHeader())
+
+	if method != "GET" {
+		request.Header.Set("Content-Type", "application/json")
+	}
+
+	app.setAuth(request)
+
+	return request, nil
 }
 
 func (app *App) newRequest(method, api string, body io.Reader) (*http.Request, error) {
@@ -191,12 +252,8 @@ func (app *App) newRequest(method, api string, body io.Reader) (*http.Request, e
 		req.Header.Set("X-Cybozu-API-Token", app.ApiToken)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", app.GetUserAgentHeader())
 
-	if len(app.GetUserAgentHeader()) != 0 {
-		req.Header.Set("User-Agent", app.userAgentHeader)
-	} else {
-		req.Header.Set("User-Agent", NAME+"/"+VERSION)
-	}
 	return req, nil
 }
 
@@ -999,4 +1056,78 @@ func (app *App) Fields() (map[string]*FieldInfo, error) {
 		ret[fi.Code] = fi
 	}
 	return ret, nil
+}
+
+func (app *App) createCursor(fields []string, query string, size uint64) ([]byte, error) {
+	type cursor struct {
+		App    uint64   `json:"app"`
+		Fields []string `json:"fields"`
+		Size   uint64   `json:"size"`
+		Query  string   `json:"query"`
+	}
+	data := cursor{App: app.AppId, Fields: fields, Size: size, Query: query}
+	fmt.Println("data", data)
+	jsonData, _ := json.Marshal(data)
+	url := app.createUrl("records/cursor", "")
+	request, err := app.NewRequest("POST", url.String(), bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, err
+	}
+	response, err := app.do(request)
+
+	if err != nil {
+		return nil, err
+	}
+	body, err := parseResponse(response)
+	if err != nil {
+		return nil, err
+	}
+	return body, nil
+}
+
+func (app *App) deleteCursor(cursorId string) (string, error) {
+	type requestBody struct {
+		Id string `json:"id"`
+	}
+	data, err := json.Marshal(requestBody{Id: cursorId})
+	if err != nil {
+		return "", err
+	}
+	url := app.createUrl("records/cursor", "")
+	request, err := app.NewRequest("DELETE", url.String(), bytes.NewBuffer(data))
+	if err != nil {
+		return "", err
+	}
+	response, err := app.do(request)
+	if err != nil {
+		return "", err
+	}
+
+	result, err := parseResponse(response)
+	if err != nil {
+		return "", err
+	}
+	if result != nil {
+	}
+	return "delete success", nil
+}
+
+func (app *App) getCurSor(idCursor string) ([]byte, error) {
+	type requestBody struct {
+		Id string `json:"id,string"`
+	}
+	url := app.createUrl("records/cursor", "id="+idCursor)
+	request, err := app.NewRequest("GET", url.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	response, err := app.do(request)
+	if err != nil {
+		return nil, err
+	}
+	result, err := parseResponse(response)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
